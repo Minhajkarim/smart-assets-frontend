@@ -1,123 +1,63 @@
 import React, { useState, useRef, useEffect } from 'react';
 import axios from 'axios';
 import io from 'socket.io-client';
-import MapComponent from './MapComponent'; // Import the MapComponent
+import { BsCamera, BsStopCircle, BsCameraReels } from 'react-icons/bs';
+import { FiUpload } from 'react-icons/fi';
 
-const socket = io('http://localhost:5000'); // Connect to the backend Socket.IO server
+const socket = io('http://localhost:5000'); // Backend server URL for Socket.IO
 
 const VideoUpload = () => {
+    // State variables
     const [videoFile, setVideoFile] = useState(null);
     const [uploadProgress, setUploadProgress] = useState(0);
     const [processingProgress, setProcessingProgress] = useState(0);
     const [processedVideoUrl, setProcessedVideoUrl] = useState(null);
+    const [processedVideos, setProcessedVideos] = useState([]); // New: List of processed videos
     const [isRecording, setIsRecording] = useState(false);
-    const [recordedBlob, setRecordedBlob] = useState(null); // State for recorded video
-    const [detectionPreview, setDetectionPreview] = useState(null); // State for detection preview
-
-    // Location and detection state
-    const [currentLocation, setCurrentLocation] = useState(null); // User's location
-    const [detectedObjects, setDetectedObjects] = useState([]); // Real-time detected objects
+    const [isPaused, setIsPaused] = useState(false);
+    const [recordedBlob, setRecordedBlob] = useState(null);
+    const [recordTime, setRecordTime] = useState(0);
+    const [cameraFacing, setCameraFacing] = useState('environment');
 
     const videoRef = useRef(null);
     const mediaRecorderRef = useRef(null);
+    const recordTimerRef = useRef(null);
+    const streamRef = useRef(null);
 
-    // Fetch user's location
-    useEffect(() => {
-        if (navigator.geolocation) {
-            navigator.geolocation.watchPosition(
-                (position) => {
-                    setCurrentLocation([position.coords.latitude, position.coords.longitude]);
-                },
-                (error) => console.error('Error fetching location:', error),
-                { enableHighAccuracy: true }
-            );
-        } else {
-            alert('Geolocation is not supported by your browser.');
-        }
-    }, []);
-
-    // Throttle location updates to prevent frequent changes
-    const useThrottledPosition = (position, delay = 5000) => {
-        const [throttledPosition, setThrottledPosition] = useState(position);
-
-        useEffect(() => {
-            const handler = setTimeout(() => {
-                setThrottledPosition(position);
-            }, delay);
-
-            return () => clearTimeout(handler);
-        }, [position, delay]);
-
-        return throttledPosition;
-    };
-
-    const throttledLocation = useThrottledPosition(currentLocation, 5000); // 5-second throttle
-
-    // Listen for processing progress updates and detection previews
+    // Socket.IO listeners
     useEffect(() => {
         socket.on('processingUpdate', (update) => {
-            if (update.progress) {
-                setProcessingProgress(update.progress); // Update the progress bar
-            }
-            if (update.preview && update.progress % 5 === 0) { // Only update every 5% progress
-                setDetectionPreview(`data:image/jpeg;base64,${update.preview}`); // Set preview image
-            }
+            if (update.progress) setProcessingProgress(update.progress);
         });
 
-        // Listen for real-time detection data
         socket.on('detectionData', (data) => {
-            setDetectedObjects(data.objects); // Update detected objects on the map
+            console.log('Detected objects:', data.objects);
         });
 
-        // Clean up the socket connection on component unmount
         return () => {
             socket.off('processingUpdate');
             socket.off('detectionData');
         };
     }, []);
 
-    // Handle file input change for video upload
-    const handleFileChange = (e) => {
-        setVideoFile(e.target.files[0]);
+    // Switch between front and back cameras
+    const switchCamera = () => {
+        setCameraFacing((prev) => (prev === 'environment' ? 'user' : 'environment'));
     };
 
-    // Handle file upload
-    const handleUpload = async () => {
-        resetProgress();
-
-        const fileToUpload = recordedBlob || videoFile; // Use recorded or uploaded file
-        if (!fileToUpload) return alert('Please select or record a video to upload.');
-
-        const formData = new FormData();
-        formData.append('video', fileToUpload);
-
-        try {
-            const response = await axios.post('http://localhost:5000/api/videos/upload', formData, {
-                headers: { 'Content-Type': 'multipart/form-data' },
-                onUploadProgress: (progressEvent) => {
-                    setUploadProgress(Math.round((progressEvent.loaded * 100) / progressEvent.total)); // Track upload progress
-                },
-            });
-
-            setProcessedVideoUrl(response.data.processedVideo); // Set the processed video URL
-        } catch (error) {
-            console.error('Upload error:', error);
-            alert('Failed to upload video.');
-        }
-    };
-
-    // Reset progress states
-    const resetProgress = () => {
-        setUploadProgress(0);
-        setProcessingProgress(0);
-        setDetectionPreview(null);
-        setProcessedVideoUrl(null);
-    };
-
-    // Start recording video
+    // Start video recording
     const startRecording = async () => {
         try {
-            const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+            if (streamRef.current) {
+                streamRef.current.getTracks().forEach(track => track.stop());
+            }
+
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: { facingMode: cameraFacing },
+                audio: true,
+            });
+
+            streamRef.current = stream;
             videoRef.current.srcObject = stream;
 
             const mediaRecorder = new MediaRecorder(stream);
@@ -136,123 +76,206 @@ const VideoUpload = () => {
 
             mediaRecorder.start();
             setIsRecording(true);
+
+            recordTimerRef.current = setInterval(() => {
+                setRecordTime((prev) => prev + 1);
+            }, 1000);
         } catch (error) {
             console.error('Error accessing camera:', error);
-            alert('Could not access your camera.');
         }
     };
 
-    // Stop video recording
+    const pauseRecording = () => {
+        if (mediaRecorderRef.current) {
+            mediaRecorderRef.current.pause();
+            setIsPaused(true);
+        }
+    };
+
+    const resumeRecording = () => {
+        if (mediaRecorderRef.current) {
+            mediaRecorderRef.current.resume();
+            setIsPaused(false);
+        }
+    };
+
     const stopRecording = () => {
         if (mediaRecorderRef.current) {
             mediaRecorderRef.current.stop();
             setIsRecording(false);
+            setIsPaused(false);
+            clearInterval(recordTimerRef.current);
+            setRecordTime(0);
+        }
+    };
+
+    const saveVideo = () => {
+        if (recordedBlob) {
+            const url = URL.createObjectURL(recordedBlob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'recorded-video.mp4';
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+    };
+
+    const handleUpload = async () => {
+        if (!videoFile) {
+            return alert('Please select or record a video to upload.');
+        }
+
+        const formData = new FormData();
+        formData.append('video', videoFile);
+
+        try {
+            const response = await axios.post('http://localhost:5000/api/videos/upload', formData, {
+                headers: { 'Content-Type': 'multipart/form-data' },
+                onUploadProgress: (progressEvent) => {
+                    const progress = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+                    console.log('Upload Progress:', progress);
+                    setUploadProgress(progress);
+                },
+            });
+
+            setProcessedVideoUrl(response.data.processedVideo);
+
+            // Update video history
+            setProcessedVideos((prev) => [
+                ...prev,
+                { url: response.data.processedVideo, name: videoFile.name },
+            ]);
+        } catch (error) {
+            console.error('Upload error:', error);
         }
     };
 
     return (
-        <div className="min-h-screen bg-gray-100 flex flex-col items-center py-10 px-4">
-            <h1 className="text-4xl font-extrabold text-gray-800 mb-12">Video Recording & Processing</h1>
-            <div className="w-full max-w-6xl bg-white shadow-xl rounded-lg p-8 flex flex-col lg:flex-row space-y-8 lg:space-y-0 gap-8">
-                
-                {/* Left side - Video Recording / Upload */}
-                <div className="flex-1 space-y-6">
-                    <div>
-                        <h2 className="text-2xl font-semibold text-gray-700 mb-4">Option 1: Record Video</h2>
-                        <video
-                            ref={videoRef}
-                            className="w-full h-64 border-2 border-gray-300 rounded-lg mb-4"
-                            autoPlay
-                            muted
-                        />
-                        <div className="flex gap-6 justify-center">
-                            {!isRecording ? (
-                                <button
-                                    onClick={startRecording}
-                                    className="px-6 py-3 bg-green-600 text-white font-semibold rounded-lg hover:bg-green-700 transition"
-                                >
-                                    Start Recording
-                                </button>
-                            ) : (
-                                <button
-                                    onClick={stopRecording}
-                                    className="px-6 py-3 bg-red-600 text-white font-semibold rounded-lg hover:bg-red-700 transition"
-                                >
-                                    Stop Recording
-                                </button>
-                            )}
-                        </div>
-                    </div>
-
-                    <div>
-                        <h2 className="text-2xl font-semibold text-gray-700 mb-4">Option 2: Upload Video</h2>
-                        <input
-                            type="file"
-                            accept="video/*"
-                            onChange={handleFileChange}
-                            className="block w-full text-sm text-gray-900 border-2 border-gray-300 rounded-lg cursor-pointer bg-gray-50 focus:outline-none"
-                        />
+        <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-200 flex flex-col items-center py-10 px-4">
+            <h1 className="text-4xl font-extrabold text-gray-800 mb-8">Object Detection</h1>
+            <div className="w-full max-w-5xl bg-white shadow-2xl rounded-lg p-8 flex flex-col space-y-8">
+                {/* Camera Controls */}
+                <div className="space-y-6">
+                    <h2 className="text-xl font-semibold">Record Video</h2>
+                    <video
+                        ref={videoRef}
+                        className="w-full h-64 bg-black rounded-lg"
+                        autoPlay
+                        muted
+                    />
+                    <div className="flex justify-center gap-4">
                         <button
-                            onClick={handleUpload}
-                            className="mt-6 px-6 py-3 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 transition"
+                            onClick={switchCamera}
+                            className="px-4 py-2 bg-yellow-500 text-white rounded-lg hover:bg-yellow-600"
                         >
-                            Upload & Process Video
+                            <BsCameraReels /> Switch Camera
                         </button>
+                        {!isRecording ? (
+                            <button
+                                onClick={startRecording}
+                                className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700"
+                            >
+                                <BsCamera /> Start Recording
+                            </button>
+                        ) : isPaused ? (
+                            <button
+                                onClick={resumeRecording}
+                                className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+                            >
+                                Resume Recording
+                            </button>
+                        ) : (
+                            <button
+                                onClick={pauseRecording}
+                                className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
+                            >
+                                <BsStopCircle /> Pause Recording
+                            </button>
+                        )}
+                        {isRecording && !isPaused && (
+                            <button
+                                onClick={stopRecording}
+                                className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
+                            >
+                                <BsStopCircle /> Stop Recording
+                            </button>
+                        )}
+                        {isRecording && <p className="text-sm text-gray-700">Recording Time: {recordTime}s</p>}
                     </div>
+                </div>
 
+                {/* Upload Video Section */}
+                <div className="space-y-6">
+                    <h2 className="text-xl font-semibold">Upload Video</h2>
+                    <input
+                        type="file"
+                        accept="video/*"
+                        onChange={(e) => setVideoFile(e.target.files[0])}
+                        className="block w-full text-sm text-gray-900 border-2 border-gray-300 rounded-lg cursor-pointer bg-gray-50 focus:outline-none"
+                    />
+                    <button
+                        onClick={handleUpload}
+                        className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+                    >
+                        <FiUpload /> Upload & Process
+                    </button>
+
+                    {/* Upload Progress */}
                     {uploadProgress > 0 && (
                         <div>
-                            <h3 className="text-lg font-medium text-gray-700">Upload Progress</h3>
-                            <div className="w-full bg-gray-200 rounded-full h-2 mt-2">
+                            <div className="relative w-full h-4 bg-gray-300 rounded-lg overflow-hidden">
                                 <div
-                                    className="bg-blue-600 h-2 rounded-full"
+                                    className="absolute h-full bg-blue-600"
                                     style={{ width: `${uploadProgress}%` }}
                                 ></div>
                             </div>
+                            <p className="text-sm text-gray-700 mt-2">{uploadProgress}% Uploaded</p>
                         </div>
                     )}
 
-                    {processingProgress > 0 && processingProgress < 100 && (
-                        <div>
-                            <h3 className="text-lg font-medium text-gray-700">Detecting Objects</h3>
-                            <div className="w-full bg-gray-200 rounded-full h-2 mt-2">
+                    {/* Processing Progress */}
+                    {processingProgress > 0 && (
+                        <div className="mt-4">
+                            <div className="relative w-full h-4 bg-gray-300 rounded-lg overflow-hidden">
                                 <div
-                                    className="bg-indigo-600 h-2 rounded-full"
+                                    className="absolute h-full bg-green-600"
                                     style={{ width: `${processingProgress}%` }}
                                 ></div>
                             </div>
-                            {detectionPreview && (
-                                <div className="mt-4">
-                                    <h4 className="text-md font-medium text-gray-700">Live Detection Preview:</h4>
-                                    <img
-                                        src={detectionPreview}
-                                        alt="Detection Preview"
-                                        className="w-full max-w-sm border-2 border-gray-300 rounded-lg mt-2"
-                                    />
-                                </div>
-                            )}
-                        </div>
-                    )}
-
-                    {processedVideoUrl && (
-                        <div>
-                            <h3 className="text-lg font-medium text-gray-700">Processed Video</h3>
-                            <video
-                                className="w-full max-w-xl mt-4"
-                                controls
-                                src={processedVideoUrl}
-                            ></video>
+                            <p className="text-sm text-gray-700 mt-2">{processingProgress}% Processed</p>
                         </div>
                     )}
                 </div>
 
-                {/* Right side - Map */}
-                <div className="flex-1 space-y-6">
-                    <h2 className="text-2xl font-semibold text-gray-700 mb-4">Live Map</h2>
-                    <MapComponent
-                        currentLocation={throttledLocation} // Throttled location
-                        detectedObjects={detectedObjects}
-                    />
+                {/* Save Recorded Video */}
+                <div>
+                    {recordedBlob && (
+                        <button
+                            onClick={saveVideo}
+                            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+                        >
+                            Save Recorded Video
+                        </button>
+                    )}
+                </div>
+
+                {/* Processed Videos */}
+                <div className="mt-8">
+                    <h2 className="text-xl font-semibold">Processed Videos</h2>
+                    <ul className="space-y-4">
+                        {processedVideos.map((video, index) => (
+                            <li key={index} className="flex items-center gap-4">
+                                <a
+                                    href={video.url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="text-blue-600 underline"
+                                >
+                                    {video.name}
+                                </a>
+                            </li>
+                        ))}
+                    </ul>
                 </div>
             </div>
         </div>
