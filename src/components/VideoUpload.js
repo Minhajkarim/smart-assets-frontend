@@ -1,28 +1,37 @@
 import React, { useState, useRef, useEffect } from 'react';
 import axios from 'axios';
 import io from 'socket.io-client';
-import { BsCamera, BsStopCircle, BsCameraReels } from 'react-icons/bs';
+import { BsCamera, BsStopCircle } from 'react-icons/bs';
 import { FiUpload } from 'react-icons/fi';
 
 const socket = io('http://localhost:5000'); // Backend server URL for Socket.IO
 
 const VideoUpload = () => {
-    // State variables
     const [videoFile, setVideoFile] = useState(null);
     const [uploadProgress, setUploadProgress] = useState(0);
     const [processingProgress, setProcessingProgress] = useState(0);
-    const [processedVideoUrl, setProcessedVideoUrl] = useState(null);
-    const [processedVideos, setProcessedVideos] = useState([]); // New: List of processed videos
+    const [processedVideos, setProcessedVideos] = useState([]);
     const [isRecording, setIsRecording] = useState(false);
-    const [isPaused, setIsPaused] = useState(false);
-    const [recordedBlob, setRecordedBlob] = useState(null);
-    const [recordTime, setRecordTime] = useState(0);
-    const [cameraFacing, setCameraFacing] = useState('environment');
-
+    const [mediaStream, setMediaStream] = useState(null);
+    const [mediaRecorder, setMediaRecorder] = useState(null);
+    const [recordedChunks, setRecordedChunks] = useState([]);
+    const [detectedObjects, setDetectedObjects] = useState([]);
+    
     const videoRef = useRef(null);
-    const mediaRecorderRef = useRef(null);
-    const recordTimerRef = useRef(null);
-    const streamRef = useRef(null);
+
+    // Fetch processed videos from the backend
+    useEffect(() => {
+        const fetchProcessedVideos = async () => {
+            try {
+                const response = await axios.get('http://localhost:5000/api/videos');
+                setProcessedVideos(response.data);
+            } catch (error) {
+                console.error('Error fetching processed videos:', error);
+            }
+        };
+
+        fetchProcessedVideos();
+    }, []);
 
     // Socket.IO listeners
     useEffect(() => {
@@ -30,95 +39,75 @@ const VideoUpload = () => {
             if (update.progress) setProcessingProgress(update.progress);
         });
 
-        socket.on('detectionData', (data) => {
-            console.log('Detected objects:', data.objects);
+        socket.on('objectDetection', (data) => {
+            // Update the list of detected objects in real-time
+            setDetectedObjects(data.objects);
         });
 
         return () => {
             socket.off('processingUpdate');
-            socket.off('detectionData');
+            socket.off('objectDetection');
         };
     }, []);
 
-    // Switch between front and back cameras
-    const switchCamera = () => {
-        setCameraFacing((prev) => (prev === 'environment' ? 'user' : 'environment'));
-    };
-
-    // Start video recording
+    // Start recording video
     const startRecording = async () => {
         try {
-            if (streamRef.current) {
-                streamRef.current.getTracks().forEach(track => track.stop());
-            }
-
-            const stream = await navigator.mediaDevices.getUserMedia({
-                video: { facingMode: cameraFacing },
+            const constraints = {
+                video: {
+                    facingMode: 'environment', // Use back camera if available
+                    width: { ideal: 1920 },
+                    height: { ideal: 1080 },
+                    aspectRatio: 16 / 9, // Enforce landscape
+                },
                 audio: true,
-            });
-
-            streamRef.current = stream;
-            videoRef.current.srcObject = stream;
-
-            const mediaRecorder = new MediaRecorder(stream);
-            mediaRecorderRef.current = mediaRecorder;
-
-            const chunks = [];
-            mediaRecorder.ondataavailable = (e) => chunks.push(e.data);
-
-            mediaRecorder.onstop = () => {
-                const blob = new Blob(chunks, { type: 'video/mp4' });
-                setRecordedBlob(blob);
-                setVideoFile(new File([blob], 'recorded-video.mp4', { type: 'video/mp4' }));
-                videoRef.current.srcObject = null;
-                stream.getTracks().forEach((track) => track.stop());
             };
 
-            mediaRecorder.start();
+            const stream = await navigator.mediaDevices.getUserMedia(constraints);
+            setMediaStream(stream);
+
+            const recorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
+            setMediaRecorder(recorder);
+
+            recorder.ondataavailable = (event) => {
+                if (event.data.size > 0) {
+                    setRecordedChunks((prev) => [...prev, event.data]);
+
+                    // Send the video chunks (frames) to the backend for object detection
+                    socket.emit('frameData', event.data); // Sending frame data to backend
+                }
+            };
+
+            recorder.start(100); // Record in small chunks (100ms)
             setIsRecording(true);
 
-            recordTimerRef.current = setInterval(() => {
-                setRecordTime((prev) => prev + 1);
-            }, 1000);
+            if (videoRef.current) {
+                videoRef.current.srcObject = stream;
+            }
         } catch (error) {
-            console.error('Error accessing camera:', error);
+            console.error('Error accessing media devices:', error);
         }
     };
 
-    const pauseRecording = () => {
-        if (mediaRecorderRef.current) {
-            mediaRecorderRef.current.pause();
-            setIsPaused(true);
-        }
-    };
-
-    const resumeRecording = () => {
-        if (mediaRecorderRef.current) {
-            mediaRecorderRef.current.resume();
-            setIsPaused(false);
-        }
-    };
-
+    // Stop recording video
     const stopRecording = () => {
-        if (mediaRecorderRef.current) {
-            mediaRecorderRef.current.stop();
-            setIsRecording(false);
-            setIsPaused(false);
-            clearInterval(recordTimerRef.current);
-            setRecordTime(0);
+        if (mediaRecorder) {
+            mediaRecorder.stop();
         }
+        if (mediaStream) {
+            mediaStream.getTracks().forEach((track) => track.stop());
+        }
+        setIsRecording(false);
     };
 
-    const saveVideo = () => {
-        if (recordedBlob) {
-            const url = URL.createObjectURL(recordedBlob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = 'recorded-video.mp4';
-            a.click();
-            URL.revokeObjectURL(url);
+    // Save the recorded video
+    useEffect(() => {
+        if (recordedChunks.length > 0) {
+            const blob = new Blob(recordedChunks, { type: 'video/webm' });
+            const file = new File([blob], `recorded-${Date.now()}.webm`, { type: 'video/webm' });
+            setVideoFile(file);
         }
-    };
+    }, [recordedChunks]);
 
     const handleUpload = async () => {
         if (!videoFile) {
@@ -133,20 +122,14 @@ const VideoUpload = () => {
                 headers: { 'Content-Type': 'multipart/form-data' },
                 onUploadProgress: (progressEvent) => {
                     const progress = Math.round((progressEvent.loaded * 100) / progressEvent.total);
-                    console.log('Upload Progress:', progress);
                     setUploadProgress(progress);
                 },
             });
 
-            setProcessedVideoUrl(response.data.processedVideo);
-
-            // Update video history
-            setProcessedVideos((prev) => [
-                ...prev,
-                { url: response.data.processedVideo, name: videoFile.name },
-            ]);
+            console.log('Upload successful:', response.data);
+            setVideoFile(null);
         } catch (error) {
-            console.error('Upload error:', error);
+            console.error('Error uploading video:', error);
         }
     };
 
@@ -154,55 +137,47 @@ const VideoUpload = () => {
         <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-200 flex flex-col items-center py-10 px-4">
             <h1 className="text-4xl font-extrabold text-gray-800 mb-8">Object Detection</h1>
             <div className="w-full max-w-5xl bg-white shadow-2xl rounded-lg p-8 flex flex-col space-y-8">
-                {/* Camera Controls */}
+                {/* Record Video Section */}
                 <div className="space-y-6">
                     <h2 className="text-xl font-semibold">Record Video</h2>
-                    <video
-                        ref={videoRef}
-                        className="w-full h-64 bg-black rounded-lg"
-                        autoPlay
-                        muted
-                    />
-                    <div className="flex justify-center gap-4">
-                        <button
-                            onClick={switchCamera}
-                            className="px-4 py-2 bg-yellow-500 text-white rounded-lg hover:bg-yellow-600"
-                        >
-                            <BsCameraReels /> Switch Camera
-                        </button>
+                    <div className="relative w-full h-64 bg-black rounded-lg overflow-hidden">
+                        <video
+                            ref={videoRef}
+                            className="absolute top-0 left-0 w-full h-full object-cover"
+                            autoPlay
+                            muted
+                        ></video>
                         {!isRecording ? (
                             <button
                                 onClick={startRecording}
-                                className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700"
+                                className="absolute bottom-4 left-4 bg-blue-600 text-white px-4 py-2 rounded-lg flex items-center gap-2 hover:bg-blue-700"
                             >
                                 <BsCamera /> Start Recording
                             </button>
-                        ) : isPaused ? (
-                            <button
-                                onClick={resumeRecording}
-                                className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
-                            >
-                                Resume Recording
-                            </button>
                         ) : (
                             <button
-                                onClick={pauseRecording}
-                                className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
-                            >
-                                <BsStopCircle /> Pause Recording
-                            </button>
-                        )}
-                        {isRecording && !isPaused && (
-                            <button
                                 onClick={stopRecording}
-                                className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
+                                className="absolute bottom-4 left-4 bg-red-600 text-white px-4 py-2 rounded-lg flex items-center gap-2 hover:bg-red-700"
                             >
                                 <BsStopCircle /> Stop Recording
                             </button>
                         )}
-                        {isRecording && <p className="text-sm text-gray-700">Recording Time: {recordTime}s</p>}
                     </div>
                 </div>
+
+                {/* Display Detected Objects */}
+                {detectedObjects.length > 0 && (
+                    <div className="space-y-4">
+                        <h2 className="text-xl font-semibold">Detected Objects</h2>
+                        <ul>
+                            {detectedObjects.map((object, index) => (
+                                <li key={index} className="text-gray-800">
+                                    {object}
+                                </li>
+                            ))}
+                        </ul>
+                    </div>
+                )}
 
                 {/* Upload Video Section */}
                 <div className="space-y-6">
@@ -219,63 +194,6 @@ const VideoUpload = () => {
                     >
                         <FiUpload /> Upload & Process
                     </button>
-
-                    {/* Upload Progress */}
-                    {uploadProgress > 0 && (
-                        <div>
-                            <div className="relative w-full h-4 bg-gray-300 rounded-lg overflow-hidden">
-                                <div
-                                    className="absolute h-full bg-blue-600"
-                                    style={{ width: `${uploadProgress}%` }}
-                                ></div>
-                            </div>
-                            <p className="text-sm text-gray-700 mt-2">{uploadProgress}% Uploaded</p>
-                        </div>
-                    )}
-
-                    {/* Processing Progress */}
-                    {processingProgress > 0 && (
-                        <div className="mt-4">
-                            <div className="relative w-full h-4 bg-gray-300 rounded-lg overflow-hidden">
-                                <div
-                                    className="absolute h-full bg-green-600"
-                                    style={{ width: `${processingProgress}%` }}
-                                ></div>
-                            </div>
-                            <p className="text-sm text-gray-700 mt-2">{processingProgress}% Processed</p>
-                        </div>
-                    )}
-                </div>
-
-                {/* Save Recorded Video */}
-                <div>
-                    {recordedBlob && (
-                        <button
-                            onClick={saveVideo}
-                            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
-                        >
-                            Save Recorded Video
-                        </button>
-                    )}
-                </div>
-
-                {/* Processed Videos */}
-                <div className="mt-8">
-                    <h2 className="text-xl font-semibold">Processed Videos</h2>
-                    <ul className="space-y-4">
-                        {processedVideos.map((video, index) => (
-                            <li key={index} className="flex items-center gap-4">
-                                <a
-                                    href={video.url}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="text-blue-600 underline"
-                                >
-                                    {video.name}
-                                </a>
-                            </li>
-                        ))}
-                    </ul>
                 </div>
             </div>
         </div>
